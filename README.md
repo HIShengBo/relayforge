@@ -18,16 +18,18 @@
 
 | key | 协议 | 传输 | 特点 | 默认端口 |
 |---|---|---|---|---|
-| `hy2` | Hysteria2 | UDP/QUIC | 丢包线路跑量首选（Brutal） | 36709 |
-| `anytls` | AnyTLS | TCP/TLS | 抗流量分析 | 34443 |
-| `tuic` | TUIC v5 | UDP/QUIC | 标准 QUIC + BBR | 34444 |
-| `ss` | Shadowsocks-2022 | TCP/UDP | blake3-gcm，抗重放 | 34445 |
-| `vmess` | VMess + WS + TLS | TCP | 老牌、兼容性最好 | 34446 |
-| `vless` | VLESS + REALITY + Vision | TCP | 抗主动探测 | 34447 |
-| `trojan` | Trojan + TLS | TCP | HTTPS 伪装 | 34448 |
-| `hysteria` | Hysteria v1 | UDP/QUIC | 老客户端兼容 | 34449 |
-| `shadowtls` | ShadowTLS v3 + SS2022 | TCP | TLS 伪装隧道 | 34450 |
-| `naive` | NaiveProxy (HTTP/2) | TCP | 浏览器指纹伪装* | 34451 |
+| `hy2` | Hysteria2 | UDP/QUIC | 丢包线路跑量首选（Brutal） | 随机 |
+| `anytls` | AnyTLS | TCP/TLS | 抗流量分析 | 随机 |
+| `tuic` | TUIC v5 | UDP/QUIC | 标准 QUIC + BBR | 随机 |
+| `ss` | Shadowsocks-2022 | TCP/UDP | blake3-gcm，抗重放 | 随机 |
+| `vmess` | VMess + WS + TLS | TCP | 老牌、兼容性最好 | 随机 |
+| `vless` | VLESS + REALITY + Vision | TCP | 抗主动探测 | 随机 |
+| `trojan` | Trojan + TLS | TCP | HTTPS 伪装 | 随机 |
+| `hysteria` | Hysteria v1 | UDP/QUIC | 老客户端兼容 | 随机 |
+| `shadowtls` | ShadowTLS v3 + SS2022 | TCP | TLS 伪装隧道 | 随机 |
+| `naive` | NaiveProxy (HTTP/2) | TCP | 浏览器指纹伪装* | 随机 |
+
+**端口规则**：不指定时每个协议自动随机分配可用端口（10000-64999，避开占用与冲突）；需要固定端口时用 `--xx-port` 逐个指定。
 
 \* naive 无 sing-box outbound，跳过自动穿透自检，其余协议全部实测。
 

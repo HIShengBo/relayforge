@@ -23,10 +23,10 @@ LANDING="" DRYRUN=0 WITHSWAP=0 FORCE=0
 PROTO_SPEC="hy2,anytls,tuic,ss"
 PUBLIC_IP="" CERT="" KEY="" UNIT="sing-box"
 
-# default port table
-P_HY2=36709; P_ANYTLS=34443; P_TUIC=34444; P_SS=34445
-P_VMESS=34446; P_VLESS=34447; P_TROJAN=34448; P_HY1=34449
-P_STLS=34450; P_NAIVE=34451
+# default port table (empty = random port assigned at runtime)
+P_HY2=""; P_ANYTLS=""; P_TUIC=""; P_SS=""
+P_VMESS=""; P_VLESS=""; P_TROJAN=""; P_HY1=""
+P_STLS=""; P_NAIVE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -87,11 +87,37 @@ fi
 
 # ---------- port assignment ----------
 declare -A PORT
-PORT[hy2]=$P_HY2; PORT[anytls]=$P_ANYTLS; PORT[tuic]=$P_TUIC; PORT[ss]=$P_SS
-PORT[vmess]=$P_VMESS; PORT[vless]=$P_VLESS; PORT[trojan]=$P_TROJAN
-PORT[hysteria]=$P_HY1; PORT[shadowtls]=$P_STLS; PORT[naive]=$P_NAIVE
+declare -A EXPLICIT
+EXPLICIT[hy2]=$P_HY2; EXPLICIT[anytls]=$P_ANYTLS; EXPLICIT[tuic]=$P_TUIC; EXPLICIT[ss]=$P_SS
+EXPLICIT[vmess]=$P_VMESS; EXPLICIT[vless]=$P_VLESS; EXPLICIT[trojan]=$P_TROJAN
+EXPLICIT[hysteria]=$P_HY1; EXPLICIT[shadowtls]=$P_STLS; EXPLICIT[naive]=$P_NAIVE
 
-if [ "${#PORT[@]}" -ne 10 ]; then echo "[x] duplicate ports"; exit 1; fi
+# value_taken PORT_KEY: 0 if port already assigned to another protocol
+port_dup() {
+  local n=$1 q
+  for q in "${!PORT[@]}"; do [ "${PORT[$q]}" = "$n" ] && return 0; done
+  return 1
+}
+
+for p in "${PROTO_LIST[@]}"; do
+  if [ -n "${EXPLICIT[$p]}" ]; then
+    PORT[$p]=${EXPLICIT[$p]}
+  else
+    # random available port in 10000-64999, unique within this deployment
+    while :; do
+      n=$(( ((RANDOM<<15) | RANDOM) % 55000 + 10000 ))
+      port_dup "$n" && continue
+      ss -tulnp 2>/dev/null | grep -E ":$n " | grep -vq 'sing-box' && continue
+      PORT[$p]=$n
+      break
+    done
+    echo "[i] $p -> port ${PORT[$p]} (random)"
+  fi
+done
+
+# duplicate value check (explicit collisions)
+DUPS=$(for p in "${PROTO_LIST[@]}"; do echo "${PORT[$p]}"; done | sort | uniq -d)
+[ -z "$DUPS" ] || { echo "[x] duplicate ports assigned: $DUPS"; exit 1; }
 for p in "${!PORT[@]}"; do
   n=${PORT[$p]}
   [ "$n" -ge 1 ] && [ "$n" -le 65535 ] || { echo "[x] port $n ($p) out of range"; exit 1; }
