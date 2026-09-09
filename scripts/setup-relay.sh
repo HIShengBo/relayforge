@@ -19,7 +19,7 @@
 # 依赖：root, sing-box >= 1.12, python3, openssl
 set -euo pipefail
 
-LANDING="" DRYRUN=0 WITHSWAP=0 FORCE=0
+LANDING="" DRYRUN=0 WITHSWAP=0 FORCE=0 NOFIREWALL=0
 PROTO_SPEC="hy2,anytls,tuic,ss"
 PUBLIC_IP="" CERT="" KEY="" UNIT="sing-box"
 
@@ -49,6 +49,7 @@ while [ $# -gt 0 ]; do
     --cert)        CERT="$2"; shift 2 ;;
     --key)         KEY="$2"; shift 2 ;;
     --unit)        UNIT="$2"; shift 2 ;;
+    --no-firewall) NOFIREWALL=1; shift ;;
     *) echo "[x] unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -57,6 +58,82 @@ done
 [ -n "$LANDING" ] || { echo "[x] --landing is required (share link or 'direct')"; exit 1; }
 command -v python3 >/dev/null || { echo "[x] python3 required"; exit 1; }
 command -v openssl >/dev/null || { echo "[x] openssl required"; exit 1; }
+
+# NOFIREWALL=1: skip automatic firewall openings
+# ---------- distro compatibility layer ----------
+# open firewall ports (firewalld / ufw / nft / iptables) — order matters:
+# firewalld > ufw > raw nft/iptables. Skipped entirely with --no-firewall.
+open_fw_tcp()  { fw_open_port "$1" tcp; }
+open_fw_udp()  { fw_open_port "$1" udp; }
+
+fw_open_port() {
+  local port=$1 proto=$2
+  # firewalld (RHEL/Rocky/Alma/Fedora/openSUSE)
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 \
+      && firewall-cmd --reload >/dev/null 2>&1 \
+      && { echo "[fw] firewalld allow ${port}/${proto}"; return; }
+    echo "[!] firewalld present but failed to open ${port}/${proto}"; return
+  fi
+  # ufw (Ubuntu/Debian)
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${port}/${proto}" >/dev/null 2>&1 && { echo "[fw] ufw allow ${port}/${proto}"; return; }
+  fi
+  # nftables with an active ruleset
+  if command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1 && [ -n "$(nft list ruleset 2>/dev/null)" ]; then
+    if nft add rule inet filter input tcp dport "$port" accept 2>/dev/null && [ "$proto" = tcp ]; then
+      echo "[fw] nft allow ${port}/tcp (non-persistent!)"; return
+    fi
+    if nft add rule inet filter input udp dport "$port" accept 2>/dev/null && [ "$proto" = udp ]; then
+      echo "[fw] nft allow ${port}/udp (non-persistent!)"; return
+    fi
+  fi
+  # iptables (legacy or via nft backend) — only if a non-empty INPUT policy chain exists
+  if command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -q '^-P INPUT DROP\|^-P INPUT REJECT'; then
+    iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null \
+      && echo "[fw] iptables allow ${port}/${proto} (non-persistent!)" && return
+  fi
+  # no active firewall found — nothing to do
+  return 0
+}
+
+fw_detect() {
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then echo firewalld
+  elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then echo ufw
+  elif command -v nft >/dev/null 2>&1 && [ -n "$(nft list ruleset 2>/dev/null)" ]; then echo nftables
+  elif command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -q '^-P INPUT DROP\|^-P INPUT REJECT'; then echo iptables
+  else echo none
+  fi
+}
+
+# SELinux (RHEL family): label cert/key paths so sing-box can read them
+selinux_fix_certs() {
+  if [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
+    local d; d=$(dirname "$CERT")
+    if command -v restorecon >/dev/null 2>&1; then
+      restorecon -R "$d" 2>/dev/null || true
+      echo "[i] SELinux: restorecon applied to $d"
+    fi
+    if command -v semanage >/dev/null 2>&1; then
+      semanage fcontext -a -t cert_t "$CERT" 2>/dev/null || true
+      semanage fcontext -a -t cert_t "$KEY" 2>/dev/null || true
+      restorecon "$CERT" "$KEY" 2>/dev/null || true
+      echo "[i] SELinux: cert_t labels applied"
+    else
+      echo "[!] SELinux enforcing: install policycoreutils-python-utils for persistent labels"
+      echo "    (dnf install policycoreutils-python-utils) then re-run this script"
+    fi
+    # cert_t relabel after generation; generic fallback
+    chcon -t cert_t "$CERT" "$KEY" 2>/dev/null || true
+  fi
+}
+
+FW_MODE=$(fw_detect)
+echo "[i] firewall: $FW_MODE"
+case "$FW_MODE" in
+  firewalld|ufw) ;;
+  nftables|iptables) echo "[!] active packet firewall detected; ports will be opened non-persistently (lost on reboot)" ;;
+esac
 
 # ---------- protocol selection ----------
 IFS=',' read -ra PROTO_LIST <<< "$PROTO_SPEC"
@@ -127,6 +204,31 @@ for p in "${!PORT[@]}"; do
 done
 for p in "${PROTO_LIST[@]}"; do echo "[i] $p -> port ${PORT[$p]}"; done
 
+# ---------- firewall: open selected ports ----------
+# transport per protocol: tcp / udp / both
+fw_proto() {
+  case "$1" in
+    hy2|tuic|hysteria) echo udp ;;
+    ss)                echo both ;;
+    *)                 echo tcp ;;
+  esac
+}
+if [ "$NOFIREWALL" = 1 ]; then
+  echo "[i] firewall handling skipped (--no-firewall)"
+elif [ "$FW_MODE" = "none" ]; then
+  echo "[i] no active firewall detected, nothing to open"
+elif [ "$DRYRUN" = 0 ]; then
+  for p in "${PROTO_LIST[@]}"; do
+    case "$(fw_proto "$p")" in
+      udp)  open_fw_udp "${PORT[$p]}" ;;
+      both) open_fw_tcp "${PORT[$p]}"; open_fw_udp "${PORT[$p]}" ;;
+      tcp)  open_fw_tcp "${PORT[$p]}" ;;
+    esac
+  done
+else
+  echo "[i] dry-run: firewall would be opened for selected ports"
+fi
+
 # shadowtls inner ss port (loopback only, random)
 STLS_INNER=$((30000 + RANDOM % 20000))
 while ss -tlnp | grep -q ":$STLS_INNER "; do STLS_INNER=$((30000 + RANDOM % 20000)); done
@@ -148,11 +250,13 @@ def tls_block(q, sni_fallback='', insecure=False):
     sni = (q.get('sni', [''])[0] or sni_fallback)
     if sni: t["server_name"] = sni
     fp = q.get('fp', [''])[0]
-    if fp: t["utls"] = {"enabled": True, "fingerprint": fp}
     if q.get('security', [''])[0] == 'reality' and q.get('pbk'):
         t["reality"] = {"enabled": True,
                         "public_key": q['pbk'][0],
                         "short_id": q.get('sid', [''])[0]}
+        fp = fp or 'chrome'   # sing-box reality client requires uTLS
+    if fp:
+        t["utls"] = {"enabled": True, "fingerprint": fp}
     if insecure or q.get('insecure', ['0'])[0] in ('1', 'true'):
         t["insecure"] = True
     return t
@@ -260,6 +364,7 @@ if [ -z "$CERT" ] || [ -z "$KEY" ]; then
     echo "[i] self-signed cert generated (clients need insecure=1)"
   fi
 fi
+selinux_fix_certs
 
 # ---------- credentials ----------
 HAS() { printf '%s\n' "${PROTO_LIST[@]}" | grep -qx "$1"; }
